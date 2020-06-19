@@ -1,0 +1,6 @@
+Cython
+numpy
+opencv-python
+progress
+pycocotools
+torch
