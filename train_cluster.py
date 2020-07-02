@@ -46,7 +46,7 @@ if __name__ == '__main__':
                                                                     num_replicas=hvd.size(), 
                                                                     rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(
-        data, batch_size=args.batch_size,
+        data, batch_size=args.batch_size, num_workers = args.num_workers,
         pin_memory=True, drop_last=True, sampler=train_sampler,
     )
     
@@ -58,7 +58,7 @@ if __name__ == '__main__':
                                                                   num_replicas=hvd.size(), 
                                                                   rank=hvd.rank())
     val_loader = torch.utils.data.DataLoader(
-        val_data, batch_size=args.batch_size,
+        val_data, batch_size=args.batch_size, num_workers = args.num_workers,
         pin_memory=True, drop_last=True, sampler=val_sampler,
     )
     
