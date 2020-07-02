@@ -31,6 +31,7 @@ class Args:
     max_objs = 10
     print_iter = 10
     pre_hm = False
+    num_workers = 8
 
     def __init__(self):
         self.device = torch.device('cuda' if self.device=='cuda' else 'cpu')
