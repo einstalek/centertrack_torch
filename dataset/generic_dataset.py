@@ -1,5 +1,6 @@
 import copy
 import math
+import random
 import os
 from collections import defaultdict
 
@@ -19,7 +20,6 @@ class GenericDataset(data.Dataset):
     rotate = 0
     flip = 0.4
     same_aug_pre = True
-    pre_hm = True
     num_classes = 1
 
     is_fusion_dataset = False
@@ -56,6 +56,9 @@ class GenericDataset(data.Dataset):
     def __init__(self, args, ann_path=None, img_dir=None, split='train'):
         super(GenericDataset, self).__init__()
         self.split = split
+        self.num_frames = args.num_frames
+        self.aug_s = args.aug_s
+        self.pre_hm = args.pre_hm
         self.max_objs = args.max_objs
         self.no_color_aug = args.no_color_aug
         self.max_frame_dist = args.max_frame_dist
@@ -100,7 +103,6 @@ class GenericDataset(data.Dataset):
             img = np.load(img_path)
         else:
             img = cv2.imread(img_path)[..., ::-1]
-        #         img, anns = self._pad_image_boxes(img, anns)
         return img, anns, img_info, img_path
 
     def _pad_image_boxes(self, img, anns, size=(512, 512)):
@@ -125,21 +127,28 @@ class GenericDataset(data.Dataset):
         img, anns, img_info, img_path = self._load_image_anns(img_id, self.coco, img_dir)
         return img, anns, img_info, img_path
 
-    def _load_pre_data(self, video_id, frame_id, static, img_id, sensor_id=1):
+    def _load_pre_data(self, video_id, frame_id, static, img_id, num_frames=1):
+        prev_frames = []
         if static:
             frame_dist = 0
             img, anns, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
+            if num_frames > 1:
+                prev_frames = [img] * (num_frames - 1)
         else:
             img_infos = self.video_to_images[video_id]
             img_ids = [(img_info['id'], img_info['frame_id']) \
                        for img_info in img_infos \
-                       if abs(img_info['frame_id'] - frame_id) < self.max_frame_dist and \
-                       (not ('sensor_id' in img_info) or img_info['sensor_id'] == sensor_id)]
+                       if abs(img_info['frame_id'] - frame_id) < self.max_frame_dist]
             rand_id = np.random.choice(len(img_ids))
             img_id, pre_frame_id = img_ids[rand_id]
             frame_dist = abs(frame_id - pre_frame_id)
             img, anns, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
-        return img, anns, frame_dist
+            if num_frames > 1:
+                for rand in random.sample(img_ids, num_frames - 1):
+                    img_id, pre_frame_id = rand
+                    prev_frame, _, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
+                    prev_frames.append(prev_frame)
+        return img, anns, frame_dist, prev_frames
 
     def __getitem__(self, index):
         img, anns, img_info, img_path = self._load_data(index)
@@ -166,14 +175,15 @@ class GenericDataset(data.Dataset):
         pre_cts, track_ids = None, None
 
         static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
-        pre_image, pre_anns, frame_dist = self._load_pre_data(
+        pre_image, pre_anns, frame_dist, prev_frames = self._load_pre_data(
             img_info['video_id'], img_info['frame_id'],
-            static, img_info['id'],
-            img_info['sensor_id'] if 'sensor_id' in img_info else 1)
+            static, img_info['id'], self.num_frames)
 
         if flipped:
             pre_image = pre_image[:, ::-1, :].copy()
             pre_anns = self._flip_anns(pre_anns, width)
+            for i, pic in enumerate(prev_frames):
+                prev_frames[i] = pic[:, ::-1, :]
 
         if self.same_aug_pre and frame_dist != 0:
             trans_input_pre = trans_input
@@ -188,8 +198,11 @@ class GenericDataset(data.Dataset):
                 c_pre, s_pre, rot, [self.output_w, self.output_h])
 
         pre_img = self._get_input(pre_image, trans_input_pre)
+        for i, pic in enumerate(prev_frames):
+            prev_frames[i] = self._get_input(pic, trans_input_pre)
         pre_hm, pre_cts, track_ids = self._get_pre_dets(pre_anns, trans_input_pre, trans_output_pre)
         ret['pre_img'] = pre_img
+        ret['prev_frames'] = prev_frames
         if self.pre_hm:
             ret['pre_hm'] = pre_hm
 
@@ -210,7 +223,7 @@ class GenericDataset(data.Dataset):
         return ret
 
     def _get_aug_param(self, c, s, width, height, disturb=False):
-        aug_s = np.random.choice(np.arange(0.7, 1.3, 0.1))
+        aug_s = np.random.choice(np.arange(*self.aug_s, 0.1))
         w_border = self._get_border(512, width)
         h_border = self._get_border(512, height)
         c[0] = np.random.randint(low=w_border, high=width - w_border)
@@ -245,11 +258,12 @@ class GenericDataset(data.Dataset):
 
         inp = (inp.astype(np.float32) / 255.)
         for c in range(3):
-            inp[..., c] *= np.random.uniform(0.8, 1.2)
+            inp[..., c] *= np.random.uniform(0.7, 1.)
         inp = np.clip(inp, 0., 1.)
         if self.split == 'train' and not self.no_color_aug:
             color_aug(self._data_rng, inp, self._eig_val, self._eig_vec)
-        inp = (inp - self.mean) / self.std
+        #         inp = (inp - self.mean) / self.std
+        inp = (inp - 0.5) / 0.5
         inp = inp.transpose(2, 0, 1)
         return inp
 
@@ -410,31 +424,3 @@ class GenericDataset(data.Dataset):
 
     def __len__(self):
         return len(self.images)
-
-
-if __name__ == "__main__":
-    args = Args()
-    data = GenericDataset(args,
-                          "/Users/einstalek/abc_set/train.json",
-                          "/Users/einstalek/abc_set/")
-    ret = data[1]
-    for k in ret:
-        if hasattr(ret[k], 'shape'):
-            print(k, ret[k].shape)
-
-    pre_img = np.transpose(ret['pre_img'], axes=[1, 2, 0])
-    img = np.transpose(ret['image'], axes=[1, 2, 0])
-    pre_hm, hm = ret['pre_hm'], ret['hm']
-
-    plt.figure(figsize=(8, 8))
-    plt.subplot(221)
-    plt.imshow(pre_img)
-    plt.subplot(222)
-    plt.imshow(pre_hm[0])
-    plt.subplot(223)
-    plt.imshow(img)
-    plt.subplot(224)
-    plt.imshow(hm[0])
-    plt.show()
-
-

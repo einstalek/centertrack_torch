@@ -76,9 +76,9 @@ class BlazePalm(nn.Module):
     def __init__(self, args):
         super(BlazePalm, self).__init__()
 
+        self.args = args
         self.heads = args.heads
-
-        inp_dim = 7 if args.pre_hm else 6
+        inp_dim = args.inp_dim
 
         self.pre_features = nn.Sequential(
             nn.Conv2d(inp_dim, 32, kernel_size=3, stride=1, padding=1, bias=False),
@@ -135,9 +135,10 @@ class BlazePalm(nn.Module):
             BlazeBlock(256, 256)
         )
 
-        self.deconv_layers = self._make_deconv_layer(1,
-                                                     [128, ],
-                                                     [4, ])
+        if self.args.use_conv_transp:
+            self.deconv_layers = self._make_deconv_layer(1,
+                                                         [128, ],
+                                                         [self.args.num_kernels, ])
         self.head_convs = nn.ModuleList()
         for (head, dim) in self.heads.items():
             self.head_convs.append(nn.Sequential(
@@ -179,7 +180,7 @@ class BlazePalm(nn.Module):
                     stride=2,
                     padding=padding,
                     output_padding=output_padding,
-                    bias=False))
+                    bias=self.args.use_bias))
             layers.append(nn.BatchNorm2d(planes, momentum=0.1))
             layers.append(nn.ReLU6(inplace=True))
             inplanes = planes
@@ -196,7 +197,11 @@ class BlazePalm(nn.Module):
         first_upscale_outputs = self.upsample_block_1(third_scale_features, second_scale_features)
         second_upscale_outputs = self.upsample_block_2(first_upscale_outputs, first_scale_features)
 
-        x = self.deconv_layers(second_upscale_outputs)
+        if self.args.use_conv_transp:
+            x = self.deconv_layers(second_upscale_outputs)
+        else:
+            x = second_upscale_outputs
+
         out = []
         for head in self.head_convs:
             out.append(head(x))
@@ -213,14 +218,3 @@ def save_model(path, epoch, model, optimizer=None):
     if not (optimizer is None):
         data['optimizer'] = optimizer.state_dict()
     torch.save(data, path)
-
-
-if __name__ == '__main__':
-    from tqdm import tqdm
-
-    args = Args()
-    model = BlazePalm(args)
-    x = torch.rand((1, 6, 256, 256))
-
-    for _ in tqdm(range(10)):
-        t = model(x)

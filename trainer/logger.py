@@ -48,5 +48,3 @@ class Logger(object):
 
     def close(self):
         self.log.close()
-
-
