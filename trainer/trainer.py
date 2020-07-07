@@ -71,7 +71,8 @@ class ModelWithLoss(torch.nn.Module):
         pre_img = batch['pre_img'] if 'pre_img' in batch else None
         pre_hm = batch['pre_hm'] if 'pre_hm' in batch else None
         image = batch['image']
-        #         outputs = self.model(image, pre_img, pre_hm)
+        if len(batch['prev_frames']) > 0:
+            pre_img = torch.cat([pre_img, *batch['prev_frames']], axis=1)
         if self.args.pre_hm:
             outputs = self.model(torch.cat([image, pre_img, pre_hm], axis=1))
         else:
@@ -128,10 +129,14 @@ class Trainer(object):
             data_time.update(time.time() - end)
 
             for k in batch:
-                if k != 'meta':
+                if k == 'meta':
+                    continue
+                if type(batch[k]) != list:
                     batch[k] = batch[k].to(self.args.device, non_blocking=True)
+                else:
+                    for i in range(len(batch[k])):
+                        batch[k][i] = batch[k][i].to(self.args.device, non_blocking=True)
 
-            _ = model_with_loss(batch)
             output, loss, loss_stats = model_with_loss(batch)
             loss = loss.mean()
             if phase == 'train':
@@ -170,4 +175,3 @@ class Trainer(object):
 
     def val(self, epoch, data_loader, rank=1):
         return self.run_epoch('val', epoch, data_loader, rank)
-

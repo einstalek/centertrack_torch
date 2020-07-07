@@ -73,9 +73,6 @@ def generic_decode(output, K=100, opt=None):
     if not ('hm' in output):
         return {}
 
-    #     if opt.zero_tracking:
-    #         output['tracking'] *= 0
-
     heat = output['hm']
     batch, cat, height, width = heat.size()
 
@@ -116,16 +113,6 @@ def generic_decode(output, K=100, opt=None):
                             ys + wh[..., 1:2] / 2], dim=2)
         ret['bboxes'] = bboxes
 
-    if 'ltrb' in output:
-        ltrb = output['ltrb']
-        ltrb = _tranpose_and_gather_feat(ltrb, inds)  # B x K x 4
-        ltrb = ltrb.view(batch, K, 4)
-        bboxes = torch.cat([xs0.view(batch, K, 1) + ltrb[..., 0:1],
-                            ys0.view(batch, K, 1) + ltrb[..., 1:2],
-                            xs0.view(batch, K, 1) + ltrb[..., 2:3],
-                            ys0.view(batch, K, 1) + ltrb[..., 3:4]], dim=2)
-        ret['bboxes'] = bboxes
-
     regression_heads = ['tracking', 'dep', 'rot', 'dim', 'amodel_offset',
                         'nuscenes_att', 'velocity']
 
@@ -145,14 +132,4 @@ def generic_decode(output, K=100, opt=None):
         ret['bboxes_amodal'] = bboxes_amodal
         ret['bboxes'] = bboxes_amodal
 
-    if 'pre_inds' in output and output['pre_inds'] is not None:
-        pre_inds = output['pre_inds']  # B x pre_K
-        pre_K = pre_inds.shape[1]
-        pre_ys = (pre_inds / width).int().float()
-        pre_xs = (pre_inds % width).int().float()
-
-        ret['pre_cts'] = torch.cat(
-            [pre_xs.unsqueeze(2), pre_ys.unsqueeze(2)], dim=2)
-
     return ret
-
