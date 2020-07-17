@@ -9,10 +9,8 @@ import torch.utils.data as data
 import numpy as np
 from pycocotools import coco
 
-from args import Args
 from dataset.utils import get_affine_transform, affine_transform, \
-    draw_umich_gaussian, gaussian_radius, color_aug
-import matplotlib.pyplot as plt
+    draw_umich_gaussian, gaussian_radius, color_aug, get_resize_transform
 
 
 class GenericDataset(data.Dataset):
@@ -31,13 +29,6 @@ class GenericDataset(data.Dataset):
     cat_ids = {1: 1}
     rest_focal_length = 1200
     num_joints = 17
-    flip_idx = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10],
-                [11, 12], [13, 14], [15, 16]]
-    edges = [[0, 1], [0, 2], [1, 3], [2, 4],
-             [4, 6], [3, 5], [5, 6],
-             [5, 7], [7, 9], [6, 8], [8, 10],
-             [6, 12], [5, 11], [11, 12],
-             [12, 14], [14, 16], [11, 13], [13, 15]]
     mean = np.array([0.40789654, 0.44719302, 0.47026115],
                     dtype=np.float32).reshape(1, 1, 3)
     std = np.array([0.28863828, 0.27408164, 0.27809835],
@@ -50,8 +41,6 @@ class GenericDataset(data.Dataset):
         [-0.56089297, 0.71832671, 0.41158938]
     ], dtype=np.float32)
     ignore_val = 1
-    nuscenes_att_range = {0: [0, 1], 1: [0, 1], 2: [2, 3, 4], 3: [2, 3, 4],
-                          4: [2, 3, 4], 5: [5, 6, 7], 6: [5, 6, 7], 7: [5, 6, 7]}
 
     def __init__(self, args, ann_path=None, img_dir=None, split='train'):
         super(GenericDataset, self).__init__()
@@ -73,6 +62,7 @@ class GenericDataset(data.Dataset):
         self.output_h = self.input_h // self.down_ratio
         self.output_w = self.input_w // self.down_ratio
         self._data_rng = np.random.RandomState(123)
+        self.args = args
         if ann_path is not None and img_dir is not None:
             print('==> initializing data from {}, \n images from {} ...'.format(ann_path, img_dir))
             self.coco = coco.COCO(ann_path)
@@ -131,24 +121,28 @@ class GenericDataset(data.Dataset):
         prev_frames = []
         if static:
             frame_dist = 0
-            img, anns, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
+            img, anns, _, img_path = self._load_image_anns(img_id, self.coco, self.img_dir)
             if num_frames > 1:
                 prev_frames = [img] * (num_frames - 1)
         else:
+            if np.random.rand() < self.args.max_dist_proba:
+                max_frame_dist = np.random.randint(low=1, high=self.max_frame_dist) + int(np.random.exponential(5))
+            else:
+                max_frame_dist = np.random.randint(low=1, high=4)
             img_infos = self.video_to_images[video_id]
             img_ids = [(img_info['id'], img_info['frame_id']) \
                        for img_info in img_infos \
-                       if abs(img_info['frame_id'] - frame_id) < self.max_frame_dist]
+                       if abs(img_info['frame_id'] - frame_id) < max_frame_dist]
             rand_id = np.random.choice(len(img_ids))
             img_id, pre_frame_id = img_ids[rand_id]
             frame_dist = abs(frame_id - pre_frame_id)
-            img, anns, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
+            img, anns, _, img_path = self._load_image_anns(img_id, self.coco, self.img_dir)
             if num_frames > 1:
                 for rand in random.sample(img_ids, num_frames - 1):
                     img_id, pre_frame_id = rand
                     prev_frame, _, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
                     prev_frames.append(prev_frame)
-        return img, anns, frame_dist, prev_frames
+        return img, anns, frame_dist, prev_frames, img_path
 
     def __getitem__(self, index):
         img, anns, img_info, img_path = self._load_data(index)
@@ -159,27 +153,35 @@ class GenericDataset(data.Dataset):
 
         c, aug_s, rot = self._get_aug_param(c, s, width, height)
         s = s * aug_s
-        if np.random.random() < self.flip:
+
+        if self.split == 'train' and np.random.random() < self.flip:
             flipped = 1
             img = img[:, ::-1, :]
             anns = self._flip_anns(anns, width)
 
-        trans_input = get_affine_transform(
-            c, s, rot, [self.input_w, self.input_h])
-        trans_output = get_affine_transform(
-            c, s, rot, [self.output_w, self.output_h])
+        if self.split == 'train':
+            trans_input = get_affine_transform(c, s, rot, [self.input_w, self.input_h])
+            trans_output = get_affine_transform(c, s, rot, [self.output_w, self.output_h])
+        else:
+            trans_input = get_resize_transform(height, width, self.input_h, self.input_w)
+            trans_output = get_resize_transform(height, width, self.output_h, self.output_w)
+
         inp = self._get_input(img, trans_input)
         ret = {'image': inp}
+        if self.args.ret_fpath:
+            ret['fpath'] = img_path
         gt_det = {'bboxes': [], 'scores': [], 'clses': [], 'cts': []}
 
         pre_cts, track_ids = None, None
 
         static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
-        pre_image, pre_anns, frame_dist, prev_frames = self._load_pre_data(
+        pre_image, pre_anns, frame_dist, prev_frames, prev_fpath = self._load_pre_data(
             img_info['video_id'], img_info['frame_id'],
             static, img_info['id'], self.num_frames)
+        if self.args.ret_fpath:
+            ret['prev_fpath'] = prev_fpath
 
-        if flipped:
+        if self.split == 'train' and flipped:
             pre_image = pre_image[:, ::-1, :].copy()
             pre_anns = self._flip_anns(pre_anns, width)
             for i, pic in enumerate(prev_frames):
@@ -255,14 +257,12 @@ class GenericDataset(data.Dataset):
         inp = cv2.warpAffine(img, trans_input,
                              (self.input_w, self.input_h),
                              flags=cv2.INTER_LINEAR)
-
         inp = (inp.astype(np.float32) / 255.)
-        for c in range(3):
-            inp[..., c] *= np.random.uniform(0.7, 1.)
-        inp = np.clip(inp, 0., 1.)
         if self.split == 'train' and not self.no_color_aug:
+            for c in range(3):
+                inp[..., c] *= np.random.uniform(0.7, 1.)
+            inp = np.clip(inp, 0., 1.)
             color_aug(self._data_rng, inp, self._eig_val, self._eig_vec)
-        #         inp = (inp - self.mean) / self.std
         inp = (inp - 0.5) / 0.5
         inp = inp.transpose(2, 0, 1)
         return inp
@@ -376,6 +376,8 @@ class GenericDataset(data.Dataset):
         if ann['conf'] < 1.0:
             return
         h, w = bbox[3] - bbox[1], bbox[2] - bbox[0]
+        h *= 1.15
+        w *= 1.15
         if h <= 0 or w <= 0:
             return
         radius = gaussian_radius((math.ceil(h), math.ceil(w)))
@@ -385,10 +387,10 @@ class GenericDataset(data.Dataset):
         ct_int = ct.astype(np.int32)
         ret['cat'][k] = cls_id - 1
         ret['mask'][k] = 1
-
         if 'wh' in ret:
             ret['wh'][k] = 1. * w, 1. * h
             ret['wh_mask'][k] = 1
+
         ret['ind'][k] = ct_int[1] * self.output_w + ct_int[0]
         ret['reg'][k] = ct - ct_int
         ret['reg_mask'][k] = 1
@@ -409,18 +411,6 @@ class GenericDataset(data.Dataset):
                 gt_det['tracking'].append(ret['tracking'][k])
             else:
                 gt_det['tracking'].append(np.zeros(2, np.float32))
-
-        if 'ltrb' in self.heads:
-            ret['ltrb'][k] = bbox[0] - ct_int[0], bbox[1] - ct_int[1], \
-                             bbox[2] - ct_int[0], bbox[3] - ct_int[1]
-            ret['ltrb_mask'][k] = 1
-
-        if 'ltrb_amodal' in self.heads:
-            ret['ltrb_amodal'][k] = \
-                bbox_amodal[0] - ct_int[0], bbox_amodal[1] - ct_int[1], \
-                bbox_amodal[2] - ct_int[0], bbox_amodal[3] - ct_int[1]
-            ret['ltrb_amodal_mask'][k] = 1
-            gt_det['ltrb_amodal'].append(bbox_amodal)
 
     def __len__(self):
         return len(self.images)

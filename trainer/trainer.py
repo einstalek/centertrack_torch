@@ -1,9 +1,41 @@
 import time
+import os
+
+import numpy as np
 
 import torch
 from trainer.losses import FastFocalLoss, RegWeightedL1Loss, RegBalancedL1Loss
 from trainer.utils import AverageMeter
+from trainer.utils import generic_decode
 from progress.bar import Bar
+import motmetrics as mm
+
+GT = None
+
+
+def iou_dist(gt, dr, max_iou=0.5):
+    gt_boxes = []
+    for box in gt:
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        gt_boxes.append((x1, y1, w, h))
+    dr_boxes = []
+    for box in dr:
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        dr_boxes.append((x1, y1, w, h))
+    return mm.distances.iou_matrix(gt_boxes, dr_boxes, max_iou=max_iou)
+
+
+def load(fid, gt, dr, use_ids=True, max_iou=0.5):
+    gt_boxes, dr_boxes = gt[fid], dr[fid]
+    gt_id = np.arange(len(gt_boxes))
+    if use_ids:
+        dr_id = [x['id'] for x in dr_boxes]
+    else:
+        dr_id = np.arange(len(dr_boxes['bboxes']))
+    dist = iou_dist(gt_boxes, dr_boxes['bboxes'], max_iou=max_iou)
+    return gt_id, dr_id, dist
 
 
 def _sigmoid(x):
@@ -88,6 +120,7 @@ class Trainer(object):
         self.loss_stats, self.loss = self._get_losses()
         self.model_with_loss = ModelWithLoss(model, self.loss, args)
         self.optimizer = optimizer
+        self.preds = {}
 
     def _get_losses(self):
         heads = self.heads
@@ -106,7 +139,7 @@ class Trainer(object):
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(device=device, non_blocking=True)
 
-    def run_epoch(self, phase, epoch, data_loader, rank=1):
+    def run_epoch(self, phase, epoch, data_loader, rank):
         model_with_loss = self.model_with_loss
         if phase == 'train':
             model_with_loss.train()
@@ -122,14 +155,14 @@ class Trainer(object):
         bar = Bar('{}'.format("tracking"), max=num_iters)
         end = time.time()
 
-        num_iters = len(data_loader) if self.args.num_iters < 0 else self.args.num_iters
+        num_iters = len(data_loader) if self.args.num_iters[phase] < 0 else self.args.num_iters[phase]
         for iter_id, batch in enumerate(data_loader):
             if iter_id >= num_iters:
                 break
             data_time.update(time.time() - end)
 
             for k in batch:
-                if k == 'meta':
+                if k in ('fpath', 'prev_fpath'):
                     continue
                 if type(batch[k]) != list:
                     batch[k] = batch[k].to(self.args.device, non_blocking=True)
@@ -138,11 +171,12 @@ class Trainer(object):
                         batch[k][i] = batch[k][i].to(self.args.device, non_blocking=True)
 
             output, loss, loss_stats = model_with_loss(batch)
+
             loss = loss.mean()
             if phase == 'train':
                 self.optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model_with_loss.parameters(), 10.)
+                torch.nn.utils.clip_grad_norm_(model_with_loss.parameters(), self.args.clip_value)
                 self.optimizer.step()
 
             batch_time.update(time.time() - end)
@@ -157,6 +191,21 @@ class Trainer(object):
             Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
                                       '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)
 
+            if rank == 0 and phase == 'val' and self.args.write_mota_metrics and epoch in self.args.save_point:
+                for i in range(self.args.batch_size):
+                    fpath = batch['fpath'][i]
+                    if 'hand_dataset' in fpath:
+                        continue
+                    fpath = fpath.split('.')[0].split('/')[-1]
+                    out = [x[i][None] for x in output]
+                    res = out
+                    dets = generic_decode({k: res[t] for (t, k) in enumerate(self.args.heads)},
+                                          self.args.max_objs, self.args)
+                    for k in dets:
+                        dets[k] = dets[k].detach().cpu().numpy()
+                    np.save(os.path.join(self.args.res_dir, fpath + '_scores.npy'), dets['scores'])
+                    np.save(os.path.join(self.args.res_dir, fpath + '_bboxes.npy'), dets['bboxes'])
+
             if rank == 0 and self.args.print_iter > 0:  # If not using progress bar
                 if iter_id % self.args.print_iter == 0:
                     print('{}| {}'.format("tracking", Bar.suffix))
@@ -165,13 +214,86 @@ class Trainer(object):
 
             del output, loss, loss_stats
 
+        if rank == 0 and phase == 'val' and self.args.write_mota_metrics and epoch in self.args.save_point:
+            self.compute_map(epoch)
+
         bar.finish()
         ret = {k: v.avg for k, v in avg_loss_stats.items()}
         ret['time'] = bar.elapsed_td.total_seconds() / 60.
         return ret, results
 
-    def train(self, epoch, data_loader, rank=1):
+    def train(self, epoch, data_loader, rank):
         return self.run_epoch('train', epoch, data_loader, rank)
 
-    def val(self, epoch, data_loader, rank=1):
+    def val(self, epoch, data_loader, rank):
+        if rank == 0:
+            for fp in os.listdir(self.args.res_dir):
+                os.remove(os.path.join(self.args.res_dir, fp))
         return self.run_epoch('val', epoch, data_loader, rank)
+
+    def collect_gt(self):
+        global GT
+        GT = {}
+        root = "/home/jovyan/mAP/input/ground-truth"
+        for x in os.listdir(root):
+            if int(x.split('.')[0].split('_')[-1]) % 10 != 0:
+                continue
+            boxes = []
+            with open(os.path.join(root, x)) as f:
+                for line in f:
+                    *bbox, s_h, s_w = line.strip().split()
+                    s_h, s_w = float(s_h), float(s_w)
+                    x1, y1, x2, y2 = list(map(float, bbox))
+                    x1, x2 = x1 / s_w, x2 / s_w
+                    y1, y2 = y1 / s_h, y2 / s_h
+                    boxes.append([x1, y1, x2, y2])
+            GT[x.split('.')[0]] = boxes
+
+    def compute_map(self, epoch):
+        global GT
+        if GT is None:
+            self.collect_gt()
+        root = self.args.res_dir
+        unique_fps = set()
+        for x in os.listdir(root):
+            name = '_'.join(x.split('.')[0].split('_')[:-1])
+            unique_fps.add(name)
+        dr = {}
+        for x in unique_fps:
+            if int(x.split('_')[-1]) % 10 != 0:
+                continue
+            if x not in dr:
+                dr[x] = {'bboxes': [], 'scores': []}
+            scores = np.load(os.path.join(root, x + '_scores.npy'))[0]
+            bboxes = np.load(os.path.join(root, x + '_bboxes.npy'))[0]
+            for score, box in zip(scores, bboxes):
+                if score > 0.3:
+                    dr[x]['scores'].append(score)
+                    dr[x]['bboxes'].append(8 * box)
+
+        inters = set(GT.keys()).intersection(dr.keys())
+        unique_fids = set()
+        for x in inters:
+            unique_fids.add('_'.join(x.split('.')[0].split('_')[:-1]))
+        unique_fids = list(unique_fids)
+        accs = []
+        for k in unique_fids:
+            acc = mm.MOTAccumulator(auto_id=True)
+            fids = sorted([x.split('.')[0] for x in inters if k in x],
+                          key=lambda x: int(x.split('.')[0].split('_')[-1]))
+            for fid in fids:
+                gt_id, dr_id, dist = load(fid, GT, dr, use_ids=False, max_iou=0.5)
+                acc.update(gt_id, dr_id, dist)
+            accs.append(acc)
+
+        mh = mm.metrics.create()
+        summary = mh.compute_many(
+            accs,
+            metrics=['num_frames', 'num_objects',
+                     'num_predictions', 'num_matches', 'num_misses', 'num_false_positives', 'num_switches',
+                     'mota', 'motp', 'recall',
+                     'idp', 'idr', 'idf1'
+                     ],
+            generate_overall=True
+        )
+        summary.to_csv(os.path.join(self.args.weights_dir, "map_result_{}.csv".format(epoch)))
