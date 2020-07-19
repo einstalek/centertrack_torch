@@ -40,6 +40,13 @@ def get_affine_transform(center,
     return trans
 
 
+def get_resize_transform(in_h, in_w, out_h, out_w):
+    src = np.array([[0, 0], [0, in_h], [in_w, 0]], dtype=np.float32)
+    dst = np.array([[0, 0], [0, out_h], [out_w, 0]], dtype=np.float32)
+    trans = cv2.getAffineTransform(src, dst)
+    return trans
+
+
 def get_dir(src_point, rot_rad):
     sn, cs = np.sin(rot_rad), np.cos(rot_rad)
 
