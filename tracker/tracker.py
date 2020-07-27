@@ -18,7 +18,8 @@ class Tracker(BaseTracker):
                 self.id_count += 1
                 # active and age are never used in the paper
                 item = {'score': item['score'],
-                        'active': 1, 'age': 1,
+                        'age': 1,
+                        'inactive': 0,
                         'tracking_id': self.id_count,
                         'bbox': item['bbox'],
                         'class': item['class'],
@@ -36,6 +37,16 @@ class Tracker(BaseTracker):
 
         dets = np.array(
             [det['ct'] + det['tracking'] for det in results], np.float32)  # N x 2
+
+        # Filter out close detections
+        closeness = ((dets.reshape((1, -1, 2)) - dets.reshape((-1, 1, 2))) ** 2).sum(axis=2)
+        xx, yy = np.where(closeness < 2)
+        drop_dets_ids = []
+        for (x, y) in zip(xx, yy):
+            if y <= x:
+                continue
+            drop_dets_ids.append(y)
+
         dets_wth_shift = np.array([det['ct'] for det in results], np.float32)
 
         track_size = 1. * np.array([((track['bbox'][2] - track['bbox'][0]) *
@@ -70,22 +81,43 @@ class Tracker(BaseTracker):
         matches = matched_indices
 
         ret = []
+        # Новые треки, смэтчившиеся с предыдущими
         for m in matches:
-            track = results[m[0]]
+            res_idx = m[0]
+            track = results[res_idx]
+            if res_idx in drop_dets_ids:
+                continue
             track['tracking_id'] = self.tracks[m[1]]['tracking_id']
-            track['age'] = 1
-            track['active'] = self.tracks[m[1]]['active'] + 1
+            track['age'] = 1 + self.tracks[m[1]]['age']
+            track['inactive'] = 0
             ret.append(track)
 
+        # Новые треки без мэтча
         for i in unmatched_dets:
+            if i in drop_dets_ids:
+                continue
             track = results[i]
             if track['score'] > self.opt.new_thresh:
                 self.id_count += 1
                 track['tracking_id'] = self.id_count
                 track['age'] = 1
-                track['active'] = 1
+                track['inactive'] = 0
                 ret.append(track)
-        self.tracks = ret
+        # Старые треки без обновлений
+        for i in range(len(self.tracks)):
+            if i in matches[:, 1]:
+                continue
+            track = self.tracks[i]
+            track['inactive'] += 1
+            track['age'] += 1
+            if track['inactive'] > 5:
+                del self.tracks[i]
+
+        if len(ret) == 0:
+            for track in self.tracks:
+                track['age'] += 1
+        else:
+            self.tracks = ret
         return ret
 
 
