@@ -12,10 +12,10 @@ from pycocotools import coco
 from dataset.utils import get_affine_transform, affine_transform, \
     draw_umich_gaussian, gaussian_radius, color_aug, get_resize_transform
 
+from augmentations import transform_fn
+
 
 class GenericDataset(data.Dataset):
-    aug_rot = 0
-    rotate = 0
     flip = 0.4
     same_aug_pre = True
     num_classes = 1
@@ -46,6 +46,8 @@ class GenericDataset(data.Dataset):
         super(GenericDataset, self).__init__()
         self.split = split
         self.num_frames = args.num_frames
+        self.aug_rot = args.aug_rot
+        self.rotate = args.rotate
         self.aug_s = args.aug_s
         self.pre_hm = args.pre_hm
         self.max_objs = args.max_objs
@@ -92,24 +94,40 @@ class GenericDataset(data.Dataset):
         if '.npy' in img_path:
             img = np.load(img_path)
         else:
-            img = cv2.imread(img_path)[..., ::-1]
-        return img, anns, img_info, img_path
+            assert os.path.exists(img_path), img_path
+            img = cv2.imread(img_path)
+            if self.args.cvt_gray:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = img[..., None]
+        #                 img = np.tile(img[..., None], 3)
 
-    def _pad_image_boxes(self, img, anns, size=(512, 512)):
+        img, anns = self._pad_image_boxes(img, anns)
+        return img[..., ::-1], anns, img_info, img_path
+
+    def _pad_image_boxes(self, img, anns, size=(384, 224)):
+        "To convert image to 384x224 we need w=1.71h"
         h, w, _ = img.shape
-        pad = max(h, w) - min(h, w)
-        img = np.pad(img, ((pad // 2, pad // 2), (0, 0), (0, 0)))
-        img = cv2.resize(img, size)
-        scale = max(h, w) / size[0]
-        for ann in anns:
-            x1, y1, w, h = ann['bbox']
-            y1 += pad / 2
-            x1 /= scale
-            y1 /= scale
-            w /= scale
-            h /= scale
-            ann['bbox'] = [x1, y1, w, h]
+        if h > (1 / 1.71) * w:
+            pad = int(1.71 * h - w)
+            img = np.pad(img, ((0, 0), (pad // 2, pad // 2), (0, 0)))
+            img = cv2.resize(img, size)
+            scale_x, scale_y = 1.71 * h / size[0], h / size[1]
+            for ann in anns:
+                x1, y1, w, h = ann['bbox']
+                x1 += pad / 2
+                x1 /= scale_x
+                y1 /= scale_y
+                w /= scale_x
+                h /= scale_y
+                ann['bbox'] = [x1, y1, w, h]
         return img, anns
+
+    def _get_augm_image(self, img):
+        try:
+            img = transform_fn(image=img)['image']
+        except:
+            pass
+        return img
 
     def _load_data(self, index):
         img_dir = self.img_dir
@@ -126,7 +144,7 @@ class GenericDataset(data.Dataset):
                 prev_frames = [img] * (num_frames - 1)
         else:
             if np.random.rand() < self.args.max_dist_proba:
-                max_frame_dist = np.random.randint(low=1, high=self.max_frame_dist) + int(np.random.exponential(5))
+                max_frame_dist = np.random.randint(low=1, high=self.max_frame_dist) + int(np.random.exponential(10))
             else:
                 max_frame_dist = np.random.randint(low=1, high=4)
             img_infos = self.video_to_images[video_id]
@@ -146,12 +164,15 @@ class GenericDataset(data.Dataset):
 
     def __getitem__(self, index):
         img, anns, img_info, img_path = self._load_data(index)
-        height, width, _ = img.shape
+        static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
+        height, width, *_ = img.shape
+        if len(img.shape) == 2:
+            img = img[..., None]
         c = np.array([img.shape[1] / 2., img.shape[0] / 2.], dtype=np.float32)
         s = max(height, width) * 1.0
         aug_s, rot, flipped = 1, 0, 0
 
-        c, aug_s, rot = self._get_aug_param(c, s, width, height)
+        c, aug_s, rot = self._get_aug_param(c, s, width, height, static=static)
         s = s * aug_s
 
         if self.split == 'train' and np.random.random() < self.flip:
@@ -174,12 +195,14 @@ class GenericDataset(data.Dataset):
 
         pre_cts, track_ids = None, None
 
-        static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
         pre_image, pre_anns, frame_dist, prev_frames, prev_fpath = self._load_pre_data(
             img_info['video_id'], img_info['frame_id'],
             static, img_info['id'], self.num_frames)
         if self.args.ret_fpath:
             ret['prev_fpath'] = prev_fpath
+
+        if len(pre_image.shape) == 2:
+            pre_image = pre_image[..., None]
 
         if self.split == 'train' and flipped:
             pre_image = pre_image[:, ::-1, :].copy()
@@ -192,7 +215,9 @@ class GenericDataset(data.Dataset):
             trans_output_pre = trans_output
         else:
             c_pre, aug_s_pre, _ = self._get_aug_param(
-                c, s, width, height, disturb=True)
+                c, s, width, height, disturb=True, static=static)
+            aug_s_pre = aug_s
+            ######### TODO: uncomment if needed #########
             s_pre = s * aug_s_pre
             trans_input_pre = get_affine_transform(
                 c_pre, s_pre, rot, [self.input_w, self.input_h])
@@ -224,8 +249,9 @@ class GenericDataset(data.Dataset):
                 calib, pre_cts, track_ids)
         return ret
 
-    def _get_aug_param(self, c, s, width, height, disturb=False):
+    def _get_aug_param(self, c, s, width, height, disturb=False, static=False):
         aug_s = np.random.choice(np.arange(*self.aug_s, 0.1))
+        #             aug_s = np.random.choice(np.arange(1., 1.25, 0.1))
         w_border = self._get_border(512, width)
         h_border = self._get_border(512, height)
         c[0] = np.random.randint(low=w_border, high=width - w_border)
@@ -257,12 +283,12 @@ class GenericDataset(data.Dataset):
         inp = cv2.warpAffine(img, trans_input,
                              (self.input_w, self.input_h),
                              flags=cv2.INTER_LINEAR)
+        if self.split == 'train' and not self.no_color_aug and not self.args.cvt_gray:
+            try:
+                inp = transform_fn(image=inp.astype(np.uint8))['image']
+            except:
+                pass
         inp = (inp.astype(np.float32) / 255.)
-        if self.split == 'train' and not self.no_color_aug:
-            for c in range(3):
-                inp[..., c] *= np.random.uniform(0.7, 1.)
-            inp = np.clip(inp, 0., 1.)
-            color_aug(self._data_rng, inp, self._eig_val, self._eig_vec)
         inp = (inp - 0.5) / 0.5
         inp = inp.transpose(2, 0, 1)
         return inp
@@ -288,7 +314,7 @@ class GenericDataset(data.Dataset):
             max_rad = 1
             if h > 0 and w > 0:
                 radius = gaussian_radius((math.ceil(h), math.ceil(w)))
-                radius = max(0, int(radius))
+                radius = max(self.args.pre_hm_min_radius, int(radius))
                 max_rad = max(max_rad, radius)
                 ct = np.array(
                     [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
@@ -376,12 +402,13 @@ class GenericDataset(data.Dataset):
         if ann['conf'] < 1.0:
             return
         h, w = bbox[3] - bbox[1], bbox[2] - bbox[0]
-        h *= 1.15
-        w *= 1.15
+        h *= self.args.widen_boxes
+        w *= self.args.widen_boxes
         if h <= 0 or w <= 0:
             return
         radius = gaussian_radius((math.ceil(h), math.ceil(w)))
-        radius = max(0, int(radius))
+        # set lower limit on the gaussian radius to 2
+        radius = max(self.args.gaussian_min_radius, int(radius))
         ct = np.array(
             [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
         ct_int = ct.astype(np.int32)

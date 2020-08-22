@@ -4,7 +4,7 @@ import os
 import numpy as np
 
 import torch
-from trainer.losses import FastFocalLoss, RegWeightedL1Loss, RegBalancedL1Loss
+from trainer.losses import FastFocalLoss, RegWeightedL1Loss, RegBalancedL1Loss, HeatmapFocalLoss
 from trainer.utils import AverageMeter
 from trainer.utils import generic_decode
 from progress.bar import Bar
@@ -49,6 +49,7 @@ class GenericLoss(torch.nn.Module):
         self.crit = FastFocalLoss()
         self.crit_reg = RegWeightedL1Loss()
         self.crit_bal_reg = RegBalancedL1Loss()
+        self.crit_heatmap_floss = HeatmapFocalLoss()
         self.args = args
         self.heads = args.heads
 
@@ -66,6 +67,8 @@ class GenericLoss(torch.nn.Module):
             output = self._sigmoid_output(outputs[s])
 
             if 'hm' in output:
+                losses['hm'] += 0.1 * self.crit_heatmap_floss(
+                    output['hm'], batch['hm'], batch['mask']) / len(weights)
                 losses['hm'] += self.crit(
                     output['hm'], batch['hm'], batch['ind'],
                     batch['mask'], batch['cat']) / len(weights)
@@ -151,11 +154,9 @@ class Trainer(object):
         data_time, batch_time = AverageMeter(), AverageMeter()
         avg_loss_stats = {l: AverageMeter() for l in self.loss_stats
                           if l in ('tot', 'hm', 'wh', 'tracking')}
-        num_iters = len(data_loader)
+        num_iters = len(data_loader) if self.args.num_iters[phase] < 0 else self.args.num_iters[phase]
         bar = Bar('{}'.format("tracking"), max=num_iters)
         end = time.time()
-
-        num_iters = len(data_loader) if self.args.num_iters[phase] < 0 else self.args.num_iters[phase]
         for iter_id, batch in enumerate(data_loader):
             if iter_id >= num_iters:
                 break
@@ -282,7 +283,7 @@ class Trainer(object):
             fids = sorted([x.split('.')[0] for x in inters if k in x],
                           key=lambda x: int(x.split('.')[0].split('_')[-1]))
             for fid in fids:
-                gt_id, dr_id, dist = load(fid, GT, dr, use_ids=False, max_iou=0.5)
+                gt_id, dr_id, dist = load(fid, GT, dr, use_ids=False, max_iou=0.55)
                 acc.update(gt_id, dr_id, dist)
             accs.append(acc)
 
