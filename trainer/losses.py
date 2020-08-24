@@ -34,6 +34,16 @@ class FastFocalLoss(nn.Module):
         return - (pos_loss + neg_loss) / num_pos
 
 
+class HeatmapFocalLoss(nn.Module):
+    def __init__(self):
+        super(HeatmapFocalLoss, self).__init__()
+        self.only_neg_loss = _only_neg_loss
+
+    def forward(self, out, target, mask):
+        pos_loss = F.l1_loss(out, target, reduction='sum')
+        return pos_loss / mask.sum()
+
+
 class RegWeightedL1Loss(nn.Module):
     def __init__(self):
         super(RegWeightedL1Loss, self).__init__()
@@ -55,7 +65,7 @@ class RegBalancedL1Loss(nn.Module):
         diff = pred * mask - target * mask
         weights = (diff < 0).float()
         weights += 4.
-        weights /= 5. # 0.8 for positive diff and 1.0 for negative
+        weights /= 5.  # 0.8 for positive diff and 1.0 for negative
         loss = torch.sum(weights * torch.abs(diff))
         loss = loss / (mask.sum() + 1e-4)
         return loss
