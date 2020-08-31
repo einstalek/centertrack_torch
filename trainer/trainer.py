@@ -10,6 +10,8 @@ from trainer.utils import generic_decode
 from progress.bar import Bar
 import motmetrics as mm
 
+from tracker.tracker import Tracker
+
 GT = None
 
 
@@ -30,10 +32,7 @@ def iou_dist(gt, dr, max_iou=0.5):
 def load(fid, gt, dr, use_ids=True, max_iou=0.5):
     gt_boxes, dr_boxes = gt[fid], dr[fid]
     gt_id = np.arange(len(gt_boxes))
-    if use_ids:
-        dr_id = [x['id'] for x in dr_boxes]
-    else:
-        dr_id = np.arange(len(dr_boxes['bboxes']))
+    dr_id = dr_boxes['ids']
     dist = iou_dist(gt_boxes, dr_boxes['bboxes'], max_iou=max_iou)
     return gt_id, dr_id, dist
 
@@ -67,7 +66,7 @@ class GenericLoss(torch.nn.Module):
             output = self._sigmoid_output(outputs[s])
 
             if 'hm' in output:
-                losses['hm'] += 0.1 * self.crit_heatmap_floss(
+                losses['hm'] += 0.2 * self.crit_heatmap_floss(
                     output['hm'], batch['hm'], batch['mask']) / len(weights)
                 losses['hm'] += self.crit(
                     output['hm'], batch['hm'], batch['ind'],
@@ -192,20 +191,44 @@ class Trainer(object):
             Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
                                       '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)
 
+            # Save model output for metrics computation
             if rank == 0 and phase == 'val' and self.args.write_mota_metrics and epoch in self.args.save_point:
+                curr_name = None
+                tracker = None
                 for i in range(self.args.batch_size):
-                    fpath = batch['fpath'][i]
-                    if 'hand_dataset' in fpath:
-                        continue
+                    try:
+                        fpath = batch['fpath'][i]
+                    except IndexError:
+                        break
                     fpath = fpath.split('.')[0].split('/')[-1]
+
+                    name, num = fpath.split("_frame_")
+                    num = int(num)
+                    if num % self.args.val_select_frame != 0:
+                        continue
+
+                    if name != curr_name:
+                        curr_name = name
+                        tracker = Tracker(self.args)
+
                     out = [x[i][None] for x in output]
                     res = out
                     dets = generic_decode({k: res[t] for (t, k) in enumerate(self.args.heads)},
                                           self.args.max_objs, self.args)
                     for k in dets:
                         dets[k] = dets[k].detach().cpu().numpy()
-                    np.save(os.path.join(self.args.res_dir, fpath + '_scores.npy'), dets['scores'])
-                    np.save(os.path.join(self.args.res_dir, fpath + '_bboxes.npy'), dets['bboxes'])
+
+                    if not tracker.init and len(dets) > 0:
+                        tracker.init_track(dets)
+                    elif len(dets) > 0:
+                        tracker.step(dets)
+
+                    with open(os.path.join(self.args.res_dir, fpath + '.txt'), "w") as f:
+                        for track in tracker.tracks:
+                            x1, y1, x2, y2 = track['bbox']
+                            f.write("{} {} {} {} {} {}\n".format(track['score'],
+                                                                 track['tracking_id'],
+                                                                 x1, y1, x2, y2))
 
             if rank == 0 and self.args.print_iter > 0:  # If not using progress bar
                 if iter_id % self.args.print_iter == 0:
@@ -245,6 +268,10 @@ class Trainer(object):
                     *bbox, s_h, s_w = line.strip().split()
                     s_h, s_w = float(s_h), float(s_w)
                     x1, y1, x2, y2 = list(map(float, bbox))
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    w, h = 1.15 * (x2 - x1), 1.15 * (y2 - y1)
+                    x1, x2 = cx - w / 2, cx + w / 2
+                    y1, y2 = cy - h / 2, cy + h / 2
                     x1, x2 = x1 / s_w, x2 / s_w
                     y1, y2 = y1 / s_h, y2 / s_h
                     boxes.append([x1, y1, x2, y2])
@@ -257,36 +284,43 @@ class Trainer(object):
         root = self.args.res_dir
         unique_fps = set()
         for x in os.listdir(root):
-            name = '_'.join(x.split('.')[0].split('_')[:-1])
+            name = x.split('.')[0]
             unique_fps.add(name)
+        # collect detection results
         dr = {}
         for x in unique_fps:
             if int(x.split('_')[-1]) % 10 != 0:
                 continue
             if x not in dr:
-                dr[x] = {'bboxes': [], 'scores': []}
-            scores = np.load(os.path.join(root, x + '_scores.npy'))[0]
-            bboxes = np.load(os.path.join(root, x + '_bboxes.npy'))[0]
-            for score, box in zip(scores, bboxes):
-                if score > 0.3:
-                    dr[x]['scores'].append(score)
-                    dr[x]['bboxes'].append(8 * box)
+                dr[x] = {'bboxes': [], 'scores': [], 'ids': []}
+
+            with open(os.path.join(root, x + '.txt')) as f:
+                tracks = f.read().split('\n')
+                tracks = [list(map(float, x.split())) for x in tracks if x]
+
+            for track in tracks:
+                score, _id, *box = track
+                dr[x]['scores'].append(score)
+                dr[x]['bboxes'].append(self.args.down_ratio * np.array(box))
+                dr[x]['ids'].append(int(_id))
 
         inters = set(GT.keys()).intersection(dr.keys())
+        # collect validation video names
         unique_fids = set()
         for x in inters:
-            unique_fids.add('_'.join(x.split('.')[0].split('_')[:-1]))
+            unique_fids.add(x.split('.')[0].split('_frame')[0])
         unique_fids = list(unique_fids)
+        # get metrics for each video
         accs = []
         for k in unique_fids:
             acc = mm.MOTAccumulator(auto_id=True)
             fids = sorted([x.split('.')[0] for x in inters if k in x],
                           key=lambda x: int(x.split('.')[0].split('_')[-1]))
             for fid in fids:
-                gt_id, dr_id, dist = load(fid, GT, dr, use_ids=False, max_iou=0.55)
+                gt_id, dr_id, dist = load(fid, GT, dr, use_ids=True, max_iou=0.55)
                 acc.update(gt_id, dr_id, dist)
             accs.append(acc)
-
+        # get overall metrics
         mh = mm.metrics.create()
         summary = mh.compute_many(
             accs,
@@ -295,6 +329,7 @@ class Trainer(object):
                      'mota', 'motp', 'recall',
                      'idp', 'idr', 'idf1'
                      ],
-            generate_overall=True
+            generate_overall=True,
+            names=unique_fids,
         )
         summary.to_csv(os.path.join(self.args.weights_dir, "map_result_{}.csv".format(epoch)))

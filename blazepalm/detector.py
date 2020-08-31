@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from args import Args
 
+from blazepalm.mobilenet import MobileNetV2
+
 
 class BlazeBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, kernel_size=3):
@@ -85,36 +87,42 @@ class BlazePalm(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU6(inplace=True))
 
-        self.backbone = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=0),
-            nn.ReLU6(inplace=True),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 32),
-            BlazeBlock(32, 64, stride=2),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 64),
-            BlazeBlock(64, 128, stride=2),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128),
-            BlazeBlock(128, 128)
-        )
+        last_channel = None
+        if self.args.backbone == 'blazepalm':
+            self.backbone = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=0),
+                nn.ReLU6(inplace=True),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 32),
+                BlazeBlock(32, 64, stride=2),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 64),
+                BlazeBlock(64, 128, stride=2),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128),
+                BlazeBlock(128, 128)
+            )
+            last_channel = 128
+        elif self.args.backbone == 'mobilenet':
+            last_channel = 128
+            self.backbone = MobileNetV2(in_channels=32, last_channel=last_channel)
 
         self.post_back_1 = nn.Sequential(
-            BlazeBlock(128, 256, stride=2),
+            BlazeBlock(last_channel, 256, stride=2),
             BlazeBlock(256, 256),
             BlazeBlock(256, 256),
             BlazeBlock(256, 256),
@@ -189,7 +197,9 @@ class BlazePalm(nn.Module):
     def forward(self, inputs):
         x = self.pre_features(inputs)
 
-        x = F.pad(x, [0, 1, 0, 1], "constant", 0)
+        if self.args.backbone == 'blazepalm':
+            x = F.pad(x, [0, 1, 0, 1], "constant", 0)
+
         first_scale_features = self.backbone(x)
         second_scale_features = self.post_back_1(first_scale_features)
         third_scale_features = self.post_back_2(second_scale_features)

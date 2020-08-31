@@ -2,16 +2,15 @@ import horovod.torch as hvd
 
 hvd.init()
 
+import torch
+
+torch.cuda.set_device(hvd.local_rank())
+import torch.utils.data
+
 import os
 import sys
 
 sys.path.insert(0, '/home/jovyan/env/lib/python3.6/site-packages/')
-
-import torch
-
-torch.cuda.set_device(hvd.local_rank())
-
-import torch.utils.data
 
 from args import Args
 
@@ -28,13 +27,17 @@ from trainer.trainer import Trainer
 if __name__ == '__main__':
     if hvd.rank() == 0:
         logger = Logger(args)
+
     blaze_palm = BlazePalm(args)
     opt = torch.optim.Adam(blaze_palm.parameters(), lr=args.lr * hvd.size())
 
+    #     # Load blazepalm weights
+    #     state_dict = torch.load("/home/jovyan/CenterTrack/ckpts/blazepalm_pretrained.pth")
+    #     state_dict = {k: v for (k, v) in state_dict.items() if 'backbone.0' not in k}
+    #     blaze_palm.load_state_dict(state_dict, strict=False)
+
     if args.load_model:
         state_dict = torch.load(args.load_model)
-        #         temp = {k: v for (k, v) in state_dict['state_dict'].items() if 'deconv_layers.0' not in k}
-        #         blaze_palm.load_state_dict(temp, strict=False)
         blaze_palm.load_state_dict(state_dict['state_dict'])
 
     opt = hvd.DistributedOptimizer(opt, named_parameters=blaze_palm.named_parameters())
@@ -44,31 +47,32 @@ if __name__ == '__main__':
     data = GenericDataset(args,
                           args.train_json,
                           args.data_dir,
-                          split='train')
+                          split='train',
+                          group_rates=args.train_group_rates)
     train_sampler = torch.utils.data.distributed.DistributedSampler(data,
                                                                     num_replicas=hvd.size(),
                                                                     rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(
         data, batch_size=args.batch_size,
         pin_memory=True, drop_last=True, sampler=train_sampler,
-        num_workers=args.num_workers,
+        num_workers=8,
     )
 
     val_data = GenericDataset(args,
                               args.val_json,
                               args.data_dir,
-                              split='val')
+                              split='val',
+                              group_rates=args.val_group_rates)
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_data,
-                                                                  num_replicas=hvd.size(),
+                                                                  num_replicas=1,
                                                                   rank=hvd.rank())
     val_loader = torch.utils.data.DataLoader(
         val_data, batch_size=args.batch_size,
-        pin_memory=True, drop_last=True, sampler=val_sampler,
-        num_workers=args.num_workers,
+        pin_memory=True, drop_last=False, sampler=val_sampler,
+        num_workers=8,
     )
 
     hvd.broadcast_parameters(blaze_palm.state_dict(), root_rank=0)
-
     written = False
 
     for epoch in range(1 + args.start_epoch, 1 + args.end_epoch):
@@ -81,7 +85,7 @@ if __name__ == '__main__':
             for param_group in opt.param_groups:
                 param_group['lr'] = lr
 
-        if not written:
+        if not written and hvd.rank() == 0:
             os.system("nvidia-smi")
             written = True
 
@@ -92,7 +96,7 @@ if __name__ == '__main__':
             logger.write('\n')
 
             with torch.no_grad():
-                log_dict_val, preds = trainer.val(epoch, val_loader)
+                log_dict_val, preds = trainer.val(epoch, val_loader, rank=hvd.rank())
                 for k, v in log_dict_val.items():
                     logger.write('{} {:8f} | '.format(k, v))
                 logger.write('\n')

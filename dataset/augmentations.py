@@ -15,14 +15,13 @@ transform_fn = A.Compose([
         A.IAASharpen(),
         A.IAAEmboss(),
         A.RandomBrightnessContrast(),
-    ], p=0.3),
+    ], p=0.2),
     A.OneOf([
+        A.ChannelShuffle(),
         A.HueSaturationValue(),
         A.RGBShift(),
-        A.ChannelShuffle(),
         A.ToSepia(),
-        A.RandomGamma(),
-    ], p=0.3),
+    ], p=0.2),
     A.OneOf([
         A.RandomSunFlare(flare_roi=(0, 0, 1., 1.), src_radius=100, p=.1),
         A.RandomFog(fog_coef_lower=0.2, fog_coef_upper=0.3, p=.1),
