@@ -12,7 +12,7 @@ from pycocotools import coco
 from dataset.utils import get_affine_transform, affine_transform, \
     draw_umich_gaussian, gaussian_radius, color_aug, get_resize_transform
 
-from augmentations import transform_fn
+from dataset.augmentations import transform_fn
 
 
 class GenericDataset(data.Dataset):
@@ -29,20 +29,9 @@ class GenericDataset(data.Dataset):
     cat_ids = {1: 1}
     rest_focal_length = 1200
     num_joints = 17
-    mean = np.array([0.40789654, 0.44719302, 0.47026115],
-                    dtype=np.float32).reshape(1, 1, 3)
-    std = np.array([0.28863828, 0.27408164, 0.27809835],
-                   dtype=np.float32).reshape(1, 1, 3)
-    _eig_val = np.array([0.2141788, 0.01817699, 0.00341571],
-                        dtype=np.float32)
-    _eig_vec = np.array([
-        [-0.58752847, -0.69563484, 0.41340352],
-        [-0.5832747, 0.00994535, -0.81221408],
-        [-0.56089297, 0.71832671, 0.41158938]
-    ], dtype=np.float32)
     ignore_val = 1
 
-    def __init__(self, args, ann_path=None, img_dir=None, split='train'):
+    def __init__(self, args, ann_path=None, img_dir=None, split='train', group_rates=None):
         super(GenericDataset, self).__init__()
         self.split = split
         self.num_frames = args.num_frames
@@ -76,6 +65,12 @@ class GenericDataset(data.Dataset):
             self.video_to_images = defaultdict(list)
             for image in self.coco.dataset['images']:
                 self.video_to_images[image['video_id']].append(image)
+            self._group_indices_by_dataset(group_rates)
+        self.__len = 0
+        self._xx = 1 + np.arange(self.input_w)
+        self._xx = np.tile(self._xx, [self.input_h, 1]) / self.input_w
+        self._yy = 1 + np.arange(self.input_h)
+        self._yy = np.tile(self._yy, [self.input_w, 1]).T / self.input_h
 
     def fake_video_data(self):
         self.coco.dataset['videos'] = []
@@ -84,6 +79,20 @@ class GenericDataset(data.Dataset):
             self.coco.dataset['images'][i]['video_id'] = img_id
             self.coco.dataset['images'][i]['frame_id'] = 1
             self.coco.dataset['videos'].append({'id': img_id})
+
+    def _group_indices_by_dataset(self, group_rates):
+        group_indices = {k: set() for k in group_rates}
+        for x in self.coco.imgs.values():
+            for group in group_rates:
+                found = False
+                for key in group:
+                    if key in x['file_name']:
+                        group_indices[group].add(x['id'])
+                        found = True
+                if found:
+                    continue
+        self.group_indices = group_indices
+        self.group_probas = np.array([group_rates[k] / self.args.batch_size for k in group_rates])
 
     def _load_image_anns(self, img_id, coco, img_dir):
         img_info = coco.loadImgs(ids=[img_id])[0]
@@ -96,10 +105,11 @@ class GenericDataset(data.Dataset):
         else:
             assert os.path.exists(img_path), img_path
             img = cv2.imread(img_path)
+
             if self.args.cvt_gray:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                img = img[..., None]
-        #                 img = np.tile(img[..., None], 3)
+                #                 img = img[..., None]
+                img = np.tile(img[..., None], 3)
 
         img, anns = self._pad_image_boxes(img, anns)
         return img[..., ::-1], anns, img_info, img_path
@@ -142,7 +152,7 @@ class GenericDataset(data.Dataset):
             img, anns, _, img_path = self._load_image_anns(img_id, self.coco, self.img_dir)
             if num_frames > 1:
                 prev_frames = [img] * (num_frames - 1)
-        else:
+        elif self.split == "train":
             if np.random.rand() < self.args.max_dist_proba:
                 max_frame_dist = np.random.randint(low=1, high=self.max_frame_dist) + int(np.random.exponential(10))
             else:
@@ -160,9 +170,29 @@ class GenericDataset(data.Dataset):
                     img_id, pre_frame_id = rand
                     prev_frame, _, _, _ = self._load_image_anns(img_id, self.coco, self.img_dir)
                     prev_frames.append(prev_frame)
+        else:
+            # for validation get previous frame
+            img_infos = self.video_to_images[video_id]
+            img_ids = [(img_info['id'], img_info['frame_id']) \
+                       for img_info in img_infos \
+                       if frame_id - img_info['frame_id'] == self.args.val_skip_frame]
+            if len(img_ids) == 0:
+                frame_dist = 0
+                img, anns, _, img_path = self._load_image_anns(img_id, self.coco, self.img_dir)
+            else:
+                img_id, pre_frame_id = img_ids[0]
+                img, anns, _, img_path = self._load_image_anns(img_id, self.coco, self.img_dir)
+                frame_dist = self.args.val_skip_frame
         return img, anns, frame_dist, prev_frames, img_path
 
     def __getitem__(self, index):
+        if self.split == "train":
+            _group = np.random.choice(
+                list(self.group_indices.keys()), p=self.group_probas
+            )
+            index = random.sample(self.group_indices[_group], 1)[0]
+            index = min(len(self) - 1, index)
+
         img, anns, img_info, img_path = self._load_data(index)
         static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
         height, width, *_ = img.shape
@@ -203,17 +233,16 @@ class GenericDataset(data.Dataset):
 
         if len(pre_image.shape) == 2:
             pre_image = pre_image[..., None]
-
         if self.split == 'train' and flipped:
             pre_image = pre_image[:, ::-1, :].copy()
             pre_anns = self._flip_anns(pre_anns, width)
             for i, pic in enumerate(prev_frames):
                 prev_frames[i] = pic[:, ::-1, :]
 
-        if self.same_aug_pre and frame_dist != 0:
+        if self.split == "train" and self.same_aug_pre and frame_dist != 0:
             trans_input_pre = trans_input
             trans_output_pre = trans_output
-        else:
+        elif self.split == "train":
             c_pre, aug_s_pre, _ = self._get_aug_param(
                 c, s, width, height, disturb=True, static=static)
             aug_s_pre = aug_s
@@ -223,6 +252,9 @@ class GenericDataset(data.Dataset):
                 c_pre, s_pre, rot, [self.input_w, self.input_h])
             trans_output_pre = get_affine_transform(
                 c_pre, s_pre, rot, [self.output_w, self.output_h])
+        else:
+            trans_input_pre = get_resize_transform(height, width, self.input_h, self.input_w)
+            trans_output_pre = get_resize_transform(height, width, self.output_h, self.output_w)
 
         pre_img = self._get_input(pre_image, trans_input_pre)
         for i, pic in enumerate(prev_frames):
@@ -257,7 +289,7 @@ class GenericDataset(data.Dataset):
         c[0] = np.random.randint(low=w_border, high=width - w_border)
         c[1] = np.random.randint(low=h_border, high=height - h_border)
 
-        if np.random.random() < self.aug_rot:
+        if np.random.random() < self.aug_rot and self.split == 'train':
             rf = self.rotate
             rot = np.clip(np.random.randn() * rf, -rf * 2, rf * 2)
         else:
@@ -279,16 +311,37 @@ class GenericDataset(data.Dataset):
                 width - bbox[0] - 1 - bbox[2], bbox[1], bbox[2], bbox[3]]
         return anns
 
+    def _gamma_transform(self, inp):
+        inp = inp ** np.random.uniform(*self.args.gamma)
+        return inp
+
+    def _brightness_transform(self, inp):
+        xx, yy = self._xx, self._yy
+        alpha = np.random.uniform(0.3, 0.7)
+        gamma = np.random.uniform(-1, 5)
+        beta_x = np.random.uniform(-2., 2.)
+        beta_y = np.random.uniform(-2., 2.)
+        zz = alpha + np.abs(beta_y * yy + beta_x * xx ** gamma) + np.random.normal(scale=0.05, size=xx.shape)
+        zz = np.clip(zz, 0, 1)
+        zz = cv2.medianBlur(zz.astype(np.float32), 5, 5)
+        return inp * zz[..., None]
+
     def _get_input(self, img, trans_input):
         inp = cv2.warpAffine(img, trans_input,
                              (self.input_w, self.input_h),
                              flags=cv2.INTER_LINEAR)
-        if self.split == 'train' and not self.no_color_aug and not self.args.cvt_gray:
+        if self.split == 'train' and not self.no_color_aug:
             try:
                 inp = transform_fn(image=inp.astype(np.uint8))['image']
             except:
                 pass
         inp = (inp.astype(np.float32) / 255.)
+        if self.split == "train" and self.args.use_gamma:
+            seed = np.random.random()
+            if seed < 0.33:
+                inp = self._gamma_transform(inp)
+            elif seed < 0.66:
+                inp = self._brightness_transform(inp)
         inp = (inp - 0.5) / 0.5
         inp = inp.transpose(2, 0, 1)
         return inp
@@ -440,4 +493,6 @@ class GenericDataset(data.Dataset):
                 gt_det['tracking'].append(np.zeros(2, np.float32))
 
     def __len__(self):
-        return len(self.images)
+        if self.__len == 0:
+            self.__len = len(self.images)
+        return self.__len

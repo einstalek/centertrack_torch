@@ -53,7 +53,6 @@ def get_dir(src_point, rot_rad):
     src_result = [0, 0]
     src_result[0] = src_point[0] * cs - src_point[1] * sn
     src_result[1] = src_point[0] * sn + src_point[1] * cs
-
     return src_result
 
 
@@ -95,9 +94,7 @@ def gaussian_radius(det_size, min_overlap=0.7):
 def gaussian2D(shape, sigma=1):
     m, n = [(ss - 1.) / 2. for ss in shape]
     y, x = np.ogrid[-m:m + 1, -n:n + 1]
-    # y, inputs = np.arange(-m, m + 1).reshape(-1, 1), np.arange(-n, n + 1).reshape(1, -1)
     h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
-    h[h < np.finfo(h.dtype).eps * h.max()] = 0
     return h
 
 
@@ -113,7 +110,6 @@ def draw_umich_gaussian(heatmap, center, radius, k=1):
 
     left, right = min(x, radius), min(width - x, radius + 1)
     top, bottom = min(y, radius), min(height - y, radius + 1)
-    # import pdb; pdb.set_trace()
     masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
     masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right]
     if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:  # TODO debug
