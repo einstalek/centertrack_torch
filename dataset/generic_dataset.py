@@ -24,8 +24,6 @@ class GenericDataset(data.Dataset):
     default_resolution = [256, 256]
     num_categories = 1
     class_name = 'human'
-    # cat_ids: map from 'category_id' in the annotation files to 1..num_categories
-    # Not using 0 because 0 is used for don't care region and ignore loss.
     cat_ids = {1: 1}
     rest_focal_length = 1200
     num_joints = 17
@@ -65,7 +63,8 @@ class GenericDataset(data.Dataset):
             self.video_to_images = defaultdict(list)
             for image in self.coco.dataset['images']:
                 self.video_to_images[image['video_id']].append(image)
-            self._group_indices_by_dataset(group_rates)
+            if self.split == 'train':
+                self._group_indices_by_dataset(group_rates)
         self.__len = 0
         self._xx = 1 + np.arange(self.input_w)
         self._xx = np.tile(self._xx, [self.input_h, 1]) / self.input_w
@@ -108,7 +107,6 @@ class GenericDataset(data.Dataset):
 
             if self.args.cvt_gray:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                #                 img = img[..., None]
                 img = np.tile(img[..., None], 3)
 
         img, anns = self._pad_image_boxes(img, anns)
