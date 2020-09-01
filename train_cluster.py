@@ -62,7 +62,7 @@ if __name__ == '__main__':
                               args.val_json,
                               args.data_dir,
                               split='val',
-                              group_rates=args.val_group_rates)
+                              group_rates=None)
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_data,
                                                                   num_replicas=1,
                                                                   rank=hvd.rank())

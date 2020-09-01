@@ -17,8 +17,6 @@ class BaseTracker:
     @staticmethod
     def split_results(dets):
         items = []
-        for k in dets:
-            dets[k] = dets[k].detach().numpy()
         for i, score in enumerate(dets['scores'][0]):
             if score < 0.3:
                 continue
