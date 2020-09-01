@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from args import Args
 
 from blazepalm.mobilenet import MobileNetV2
+from blazepalm.resnet import resnet50
 
 
 class BlazeBlock(nn.Module):
@@ -82,13 +83,13 @@ class BlazePalm(nn.Module):
         self.heads = args.heads
         inp_dim = args.inp_dim
 
-        self.pre_features = nn.Sequential(
-            nn.Conv2d(inp_dim, 32, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU6(inplace=True))
-
         last_channel = None
         if self.args.backbone == 'blazepalm':
+            self.pre_features = nn.Sequential(
+                nn.Conv2d(inp_dim, 32, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(32),
+                nn.ReLU6(inplace=True))
+
             self.backbone = nn.Sequential(
                 nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=0),
                 nn.ReLU6(inplace=True),
@@ -116,32 +117,35 @@ class BlazePalm(nn.Module):
                 BlazeBlock(128, 128),
                 BlazeBlock(128, 128)
             )
+
+            self.post_back_1 = nn.Sequential(
+                BlazeBlock(128, 256, stride=2),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256)
+            )
+
+            self.post_back_2 = nn.Sequential(
+                BlazeBlock(256, 256, stride=2),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256),
+                BlazeBlock(256, 256)
+            )
             last_channel = 128
+        elif self.args.backbone == 'resnet50':
+            self.backbone = resnet50(in_channels=6)
+            last_channel = 1024
         elif self.args.backbone == 'mobilenet':
-            last_channel = 128
-            self.backbone = MobileNetV2(in_channels=32, last_channel=last_channel)
-
-        self.post_back_1 = nn.Sequential(
-            BlazeBlock(last_channel, 256, stride=2),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256)
-        )
-
-        self.post_back_2 = nn.Sequential(
-            BlazeBlock(256, 256, stride=2),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256),
-            BlazeBlock(256, 256)
-        )
+            self.backbone = MobileNetV2(in_channels=6, last_channel=320)
+            last_channel = 320
 
         if self.args.use_conv_transp:
             self.deconv_layers = self._make_deconv_layer(1,
@@ -150,7 +154,7 @@ class BlazePalm(nn.Module):
         self.head_convs = nn.ModuleList()
         for (head, dim) in self.heads.items():
             self.head_convs.append(nn.Sequential(
-                nn.Conv2d(128, dim, stride=1, kernel_size=3, padding=1)))
+                nn.Conv2d(last_channel, dim, stride=1, kernel_size=3, padding=1)))
 
         self.upsample_block_1 = BlazeUpsampleBlock(256, 256)
         self.upsample_block_2 = BlazeUpsampleBlock(256, 128)
@@ -195,22 +199,22 @@ class BlazePalm(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, inputs):
-        x = self.pre_features(inputs)
-
         if self.args.backbone == 'blazepalm':
+            x = self.pre_features(inputs)
             x = F.pad(x, [0, 1, 0, 1], "constant", 0)
 
-        first_scale_features = self.backbone(x)
-        second_scale_features = self.post_back_1(first_scale_features)
-        third_scale_features = self.post_back_2(second_scale_features)
+            first_scale_features = self.backbone(x)
+            second_scale_features = self.post_back_1(first_scale_features)
+            third_scale_features = self.post_back_2(second_scale_features)
 
-        first_upscale_outputs = self.upsample_block_1(third_scale_features, second_scale_features)
-        second_upscale_outputs = self.upsample_block_2(first_upscale_outputs, first_scale_features)
-
-        if self.args.use_conv_transp:
-            x = self.deconv_layers(second_upscale_outputs)
+            first_upscale_outputs = self.upsample_block_1(third_scale_features, second_scale_features)
+            second_upscale_outputs = self.upsample_block_2(first_upscale_outputs, first_scale_features)
+            if self.args.use_conv_transp:
+                x = self.deconv_layers(second_upscale_outputs)
+            else:
+                x = second_upscale_outputs
         else:
-            x = second_upscale_outputs
+            x = self.backbone(inputs)
 
         out = []
         for head in self.head_convs:
