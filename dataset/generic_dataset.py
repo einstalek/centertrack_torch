@@ -9,8 +9,8 @@ import torch.utils.data as data
 import numpy as np
 from pycocotools import coco
 
-from dataset.utils import get_affine_transform, affine_transform, \
-    draw_umich_gaussian, gaussian_radius, color_aug, get_resize_transform
+from dataset.utils import get_affine_transform, affine_transform, crop_near_box, \
+    draw_umich_gaussian, gaussian_radius, get_resize_transform, gamma_transform, brightness_transform
 
 from dataset.augmentations import transform_fn
 
@@ -192,6 +192,19 @@ class GenericDataset(data.Dataset):
             index = min(len(self) - 1, index)
 
         img, anns, img_info, img_path = self._load_data(index)
+        height, width, *_ = img.shape
+
+        cropped, crop_id = False, None
+        if np.random.random() < self.args.crop_near_box and len(anns) > 0:
+            _ann = [x for x in anns if x['conf'] > 0]
+            if len(_ann) > 0:
+                _ann = random.sample(_ann, 1)[0]
+                box = _ann['bbox']
+                if box[2] > self.args.crop_min_box_size and box[3] > self.args.crop_min_box_size:
+                    img, anns = crop_near_box(img, box, anns)
+                    img, anns = self._pad_image_boxes(img, anns)
+                    cropped, crop_id = True, _ann['track_id']
+
         static = (img_info['prev_image_id'] == -1 and img_info['next_image_id'] == -1)
         height, width, *_ = img.shape
         if len(img.shape) == 2:
@@ -226,8 +239,17 @@ class GenericDataset(data.Dataset):
         pre_image, pre_anns, frame_dist, prev_frames, prev_fpath = self._load_pre_data(
             img_info['video_id'], img_info['frame_id'],
             static, img_info['id'], self.num_frames)
+        height, width, *_ = pre_image.shape
         if self.args.ret_fpath:
             ret['prev_fpath'] = prev_fpath
+
+        if cropped:
+            _ann = [x for x in pre_anns if x['track_id'] == crop_id]
+            if len(_ann) == 1:
+                box = _ann[0]['bbox']
+                pre_image, pre_anns = crop_near_box(pre_image, box, pre_anns, enl=(2.5, 3.))
+                pre_image, pre_anns = self._pad_image_boxes(pre_image, pre_anns)
+        height, width, *_ = pre_image.shape
 
         if len(pre_image.shape) == 2:
             pre_image = pre_image[..., None]
@@ -281,7 +303,6 @@ class GenericDataset(data.Dataset):
 
     def _get_aug_param(self, c, s, width, height, disturb=False, static=False):
         aug_s = np.random.choice(np.arange(*self.aug_s, 0.1))
-        #             aug_s = np.random.choice(np.arange(1., 1.25, 0.1))
         w_border = self._get_border(512, width)
         h_border = self._get_border(512, height)
         c[0] = np.random.randint(low=w_border, high=width - w_border)
@@ -309,21 +330,6 @@ class GenericDataset(data.Dataset):
                 width - bbox[0] - 1 - bbox[2], bbox[1], bbox[2], bbox[3]]
         return anns
 
-    def _gamma_transform(self, inp):
-        inp = inp ** np.random.uniform(*self.args.gamma)
-        return inp
-
-    def _brightness_transform(self, inp):
-        xx, yy = self._xx, self._yy
-        alpha = np.random.uniform(0.3, 0.7)
-        gamma = np.random.uniform(-1, 5)
-        beta_x = np.random.uniform(-2., 2.)
-        beta_y = np.random.uniform(-2., 2.)
-        zz = alpha + np.abs(beta_y * yy + beta_x * xx ** gamma) + np.random.normal(scale=0.05, size=xx.shape)
-        zz = np.clip(zz, 0, 1)
-        zz = cv2.medianBlur(zz.astype(np.float32), 5, 5)
-        return inp * zz[..., None]
-
     def _get_input(self, img, trans_input):
         inp = cv2.warpAffine(img, trans_input,
                              (self.input_w, self.input_h),
@@ -337,9 +343,9 @@ class GenericDataset(data.Dataset):
         if self.split == "train" and self.args.use_gamma:
             seed = np.random.random()
             if seed < 0.33:
-                inp = self._gamma_transform(inp)
+                inp = gamma_transform(self.args, inp)
             elif seed < 0.66:
-                inp = self._brightness_transform(inp)
+                inp = brightness_transform(self._xx, self._yy, inp)
         inp = (inp - 0.5) / 0.5
         inp = inp.transpose(2, 0, 1)
         return inp

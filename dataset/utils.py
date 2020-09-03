@@ -2,6 +2,37 @@ import random
 
 import cv2
 import numpy as np
+from copy import deepcopy
+
+
+def crop_near_box(img, box, anns, scale=1., shift=0.5, enl=(1.5, 3.)):
+    h, w, _ = img.shape
+    # randomly shift and enlarge box
+    x1, y1, bw, bh = box
+    cx, cy = x1 + bw / 2, y1 + bh / 2
+    cx = cx + bw * np.random.uniform(-shift, shift)
+    cy = cy + bh * np.random.uniform(-shift, shift)
+    bw = bw * np.random.uniform(*enl)
+    bh = bh * np.random.uniform(*enl)
+    x1, y1 = cx - scale * bw, cy - scale * bh
+    x2, y2 = cx + scale * bw, cy + scale * bh
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w-1, x2), min(h-1, y2)
+    x1, y1, x2, y2 = list(map(int, (x1, y1, x2, y2)))
+    crop = img[y1:y2, x1:x2, :]
+    h, w, _ = crop.shape
+    new_anns = []
+    # apply transform to the rest of annotations
+    for ann in deepcopy(anns):
+        box = ann['bbox']
+        box = [box[0]-x1, box[1]-y1, box[2], box[3]]
+        cx, cy = box[0] + box[2]/2, box[1] + box[3]/2
+        if not (0 < cx < w-1 and 0 < cy < h-1):
+            continue
+        box[0], box[1] = max(0, box[0]), max(0, box[1])
+        ann['bbox'] = box
+        new_anns.append(ann)
+    return crop, new_anns
 
 
 def get_affine_transform(center,
@@ -156,3 +187,20 @@ def brightness_(data_rng, image, gs, gs_mean, var):
 def contrast_(data_rng, image, gs, gs_mean, var):
     alpha = 1. + data_rng.uniform(low=-var, high=var)
     blend_(alpha, image, gs_mean)
+
+
+def gamma_transform(args, inp):
+    inp = inp ** np.random.uniform(*args.gamma)
+    return inp
+
+
+def brightness_transform(_xx, _yy, inp):
+    xx, yy = _xx, _yy
+    alpha = np.random.uniform(0.3, 0.7)
+    gamma = np.random.uniform(-1, 5)
+    beta_x = np.random.uniform(-2., 2.)
+    beta_y = np.random.uniform(-2., 2.)
+    zz = alpha + np.abs(beta_y * yy + beta_x * xx ** gamma) + np.random.normal(scale=0.05, size=xx.shape)
+    zz = np.clip(zz, 0, 1)
+    zz = cv2.medianBlur(zz.astype(np.float32), 5, 5)
+    return inp * zz[..., None]

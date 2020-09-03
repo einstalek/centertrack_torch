@@ -47,15 +47,17 @@ class Args:
     # Augmentation parameters
     aug_rot = 1
     rotate = 5
+    crop_near_box = 0.15
+    crop_min_box_size = 60
     fp_disturb = 0.2
     lost_disturb = 0.4
     hm_disturb = 0.08
     no_color_aug = False
     use_gamma = True
     gamma = (0.3, 2.)
-    aug_s = (0.6, 1.3)
+    aug_s = (0.6, 1)
 
-    comment = "mobilenet backbone"
+    comment = "blazepalm backbone"
 
     # Training parameters
     batch_size = 92
