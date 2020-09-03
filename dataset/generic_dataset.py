@@ -195,7 +195,7 @@ class GenericDataset(data.Dataset):
         height, width, *_ = img.shape
 
         cropped, crop_id = False, None
-        if np.random.random() < self.args.crop_near_box and len(anns) > 0:
+        if self.split == 'train' and np.random.random() < self.args.crop_near_box and len(anns) > 0:
             _ann = [x for x in anns if x['conf'] > 0]
             if len(_ann) > 0:
                 _ann = random.sample(_ann, 1)[0]
