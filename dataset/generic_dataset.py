@@ -130,13 +130,6 @@ class GenericDataset(data.Dataset):
                 ann['bbox'] = [x1, y1, w, h]
         return img, anns
 
-    def _get_augm_image(self, img):
-        try:
-            img = transform_fn(image=img)['image']
-        except:
-            pass
-        return img
-
     def _load_data(self, index):
         img_dir = self.img_dir
         img_id = self.images[index]
@@ -186,7 +179,8 @@ class GenericDataset(data.Dataset):
     def __getitem__(self, index):
         if self.split == "train":
             _group = np.random.choice(
-                list(self.group_indices.keys()), p=self.group_probas
+                np.array(list(self.group_indices.keys()), dtype=object),
+                p=self.group_probas
             )
             index = random.sample(self.group_indices[_group], 1)[0]
             index = min(len(self) - 1, index)
@@ -331,13 +325,16 @@ class GenericDataset(data.Dataset):
         return anns
 
     def _get_input(self, img, trans_input):
+        h, w, _ = img.shape
+        if h <= 0 or w <= 0:
+            raise ValueError
         inp = cv2.warpAffine(img, trans_input,
                              (self.input_w, self.input_h),
                              flags=cv2.INTER_LINEAR)
         if self.split == 'train' and not self.no_color_aug:
             try:
                 inp = transform_fn(image=inp.astype(np.uint8))['image']
-            except:
+            except TypeError:
                 pass
         inp = (inp.astype(np.float32) / 255.)
         if self.split == "train" and self.args.use_gamma:
@@ -463,9 +460,12 @@ class GenericDataset(data.Dataset):
         w *= self.args.widen_boxes
         if h <= 0 or w <= 0:
             return
-        radius = gaussian_radius((math.ceil(h), math.ceil(w)))
+#         radius = gaussian_radius((math.ceil(h * self.args.down_ratio),
+#                                   math.ceil(w * self.args.down_ratio)))
+        radius = gaussian_radius((math.ceil(h * 2), math.ceil(w * 2)))
         # set lower limit on the gaussian radius to 2
-        radius = max(self.args.gaussian_min_radius, int(radius))
+#         radius = max(self.args.gaussian_min_radius, int(radius))
+        radius = int(radius)
         ct = np.array(
             [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
         ct_int = ct.astype(np.int32)

@@ -66,7 +66,7 @@ class GenericLoss(torch.nn.Module):
             output = self._sigmoid_output(outputs[s])
 
             if 'hm' in output:
-                losses['hm'] += 0.2 * self.crit_heatmap_floss(
+                losses['hm'] += self.args.hm_l1_loss * self.crit_heatmap_floss(
                     output['hm'], batch['hm'], batch['mask']) / len(weights)
                 losses['hm'] += self.crit(
                     output['hm'], batch['hm'], batch['ind'],
@@ -171,7 +171,6 @@ class Trainer(object):
                         batch[k][i] = batch[k][i].to(self.args.device, non_blocking=True)
 
             output, loss, loss_stats = model_with_loss(batch)
-
             loss = loss.mean()
             if phase == 'train':
                 self.optimizer.zero_grad()
@@ -191,7 +190,6 @@ class Trainer(object):
             Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
                                       '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)
 
-            # Save model output for metrics computation
             if rank == 0 and phase == 'val' and self.args.write_mota_metrics and epoch in self.args.save_point:
                 curr_name = None
                 tracker = None
@@ -229,13 +227,11 @@ class Trainer(object):
                             f.write("{} {} {} {} {} {}\n".format(track['score'],
                                                                  track['tracking_id'],
                                                                  x1, y1, x2, y2))
-
             if rank == 0 and self.args.print_iter > 0:  # If not using progress bar
                 if iter_id % self.args.print_iter == 0:
                     print('{}| {}'.format("tracking", Bar.suffix))
             else:
                 bar.next()
-
             del output, loss, loss_stats
 
         if rank == 0 and phase == 'val' and self.args.write_mota_metrics and epoch in self.args.save_point:
@@ -269,7 +265,7 @@ class Trainer(object):
                     s_h, s_w = float(s_h), float(s_w)
                     x1, y1, x2, y2 = list(map(float, bbox))
                     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                    w, h = 1.15 * (x2 - x1), 1.15 * (y2 - y1)
+                    w, h = self.args.widen_boxes * (x2 - x1), self.args.widen_boxes * (y2 - y1)
                     x1, x2 = cx - w / 2, cx + w / 2
                     y1, y2 = cy - h / 2, cy + h / 2
                     x1, x2 = x1 / s_w, x2 / s_w
@@ -286,7 +282,7 @@ class Trainer(object):
         for x in os.listdir(root):
             name = x.split('.')[0]
             unique_fps.add(name)
-        # collect detection results
+
         dr = {}
         for x in unique_fps:
             if int(x.split('_')[-1]) % 10 != 0:
@@ -305,12 +301,10 @@ class Trainer(object):
                 dr[x]['ids'].append(int(_id))
 
         inters = set(GT.keys()).intersection(dr.keys())
-        # collect validation video names
         unique_fids = set()
         for x in inters:
             unique_fids.add(x.split('.')[0].split('_frame')[0])
         unique_fids = list(unique_fids)
-        # get metrics for each video
         accs = []
         for k in unique_fids:
             acc = mm.MOTAccumulator(auto_id=True)
@@ -320,7 +314,6 @@ class Trainer(object):
                 gt_id, dr_id, dist = load(fid, GT, dr, use_ids=True, max_iou=0.55)
                 acc.update(gt_id, dr_id, dist)
             accs.append(acc)
-        # get overall metrics
         mh = mm.metrics.create()
         summary = mh.compute_many(
             accs,

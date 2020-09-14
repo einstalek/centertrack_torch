@@ -2,7 +2,6 @@ import random
 
 import cv2
 import numpy as np
-from copy import deepcopy
 
 
 def crop_near_box(img, box, anns, scale=1., shift=0.5, enl=(1.5, 3.)):
@@ -23,7 +22,8 @@ def crop_near_box(img, box, anns, scale=1., shift=0.5, enl=(1.5, 3.)):
     h, w, _ = crop.shape
     new_anns = []
     # apply transform to the rest of annotations
-    for ann in deepcopy(anns):
+#     for ann in deepcopy(anns):
+    for ann in anns:
         box = ann['bbox']
         box = [box[0]-x1, box[1]-y1, box[2], box[3]]
         cx, cy = box[0] + box[2]/2, box[1] + box[3]/2
@@ -133,7 +133,7 @@ def gaussian2D(shape, sigma=1):
 def draw_umich_gaussian(heatmap, center, radius, k=1):
     # import pdb; pdb.set_trace()
     diameter = 2 * radius + 1
-    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
+    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 4)
 
     x, y = int(center[0]), int(center[1])
 

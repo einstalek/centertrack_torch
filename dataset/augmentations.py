@@ -27,5 +27,5 @@ transform_fn = A.Compose([
         A.RandomFog(fog_coef_lower=0.2, fog_coef_upper=0.3, p=.1),
         A.RandomShadow(p=.1),
         A.RandomRain(p=.1, blur_value=1),
-    ], p=0.2)
+    ], p=0.1)
 ])
